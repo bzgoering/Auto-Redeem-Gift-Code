@@ -11,15 +11,14 @@ from requests.adapters import HTTPAdapter, Retry
 import discord
 from discord import app_commands
 
-
 # ----------------------------------------------------------------------------
 # CONFIG -- edit these
 # ----------------------------------------------------------------------------
 
-DISCORD_BOT_TOKEN = "{Token Here}"
-ANNOUNCE_CHANNEL_ID = 0000000000000000000  # channel where codes get posted
-GUILD_ID = 000000000000000000000  # your server's ID, for instant slash-command sync
-STATE_ID = 0000
+DISCORD_BOT_TOKEN = "{Token}"
+ANNOUNCE_CHANNEL_ID = ###################  # channel where codes get posted
+GUILD_ID = ################### # your server's ID, for instant slash-command sync
+STATE_ID = ####  # fallback only: used when a player has no state of their own
 
 # Regex used to pull a code out of a Discord announcement message.
 # Adjust to match how codes are actually formatted/announced.
@@ -122,7 +121,11 @@ def _save_json(path: Path, data) -> None:
 
 
 def _load_players() -> list:
-    """Loads players.json as a flat list of {"fid", "name"} dicts.
+    """Loads players.json as a flat list of {"fid", "name", "state"} dicts.
+
+    Each player carries their own state/kingdom, since an alliance's members
+    aren't all in one state. Entries saved before `state` existed fall back to
+    STATE_ID.
 
     FIDs are a single shared list, not tied to any Discord user. Older formats
     are migrated/flattened on load, de-duplicated by fid:
@@ -145,13 +148,21 @@ def _load_players() -> list:
             if fid in seen:  # same FID registered twice -- keep one
                 continue
             seen.add(fid)
-            players.append({"fid": fid, "name": entry.get("name", fid)})
+            players.append({
+                "fid": fid,
+                "name": entry.get("name", fid),
+                "state": entry.get("state", STATE_ID),
+            })
     return players
 
 
 def _registered_players() -> list:
-    """Returns [{"id": fid, "name": display_name}, ...] for every registered FID."""
-    return [{"id": e["fid"], "name": e["name"]} for e in _load_players()]
+    """Returns [{"id": fid, "name": display_name, "state": kid}, ...] for every
+    registered FID."""
+    return [
+        {"id": e["fid"], "name": e["name"], "state": e["state"]}
+        for e in _load_players()
+    ]
 
 
 def _claim_status(entry) -> str:
@@ -179,12 +190,13 @@ def redeem_code_for_all(code: str, players: list = None) -> str:
 
     for player in players:
         fid, name = player["id"], player["name"]
+        state = player.get("state", STATE_ID)
 
         if _claim_status(results[code].get(fid)) == "claimed":
             claimed += 1
             continue
 
-        response = _redeem(fid, code, STATE_ID)
+        response = _redeem(fid, code, state)
         msg = str(response.get("msg", "")).strip().rstrip(".").upper()
         err_code = response.get("err_code")
 
@@ -205,10 +217,10 @@ def redeem_code_for_all(code: str, players: list = None) -> str:
         elif err_code == 40008:  # already received
             claimed += 1
             results[code][fid] = {"name": name, "status": "claimed"}
-        elif err_code == 40020:  # wrong state, or FID not in STATE_ID
+        elif err_code == 40020:  # FID not in the state we sent
             invalid += 1
             invalid_lines.append(
-                f"{name} ({fid}): not found in state {STATE_ID} -- re-check the FID/state"
+                f"{name} ({fid}): not found in state {state} -- re-check the FID/state"
             )
         elif err_code == 40001:  # role does not exist
             invalid += 1
@@ -287,8 +299,9 @@ def _clean_fid(raw: str) -> str:
 @app_commands.describe(
     fid="The in-game FID to add (tap the avatar in-game to find it)",
     name="Display name to show for this player (the API no longer exposes in-game names)",
+    state=f"The player's state/kingdom number (defaults to {STATE_ID})",
 )
-async def register(interaction: discord.Interaction, fid: str, name: str):
+async def register(interaction: discord.Interaction, fid: str, name: str, state: int = STATE_ID):
     await interaction.response.defer(ephemeral=True)
 
     fid = _clean_fid(fid)
@@ -305,11 +318,11 @@ async def register(interaction: discord.Interaction, fid: str, name: str):
         )
         return
 
-    # No login endpoint anymore -- validate the FID against our state instead.
-    if not await asyncio.to_thread(_validate_fid, fid, STATE_ID):
+    # No login endpoint anymore -- validate the FID against their state instead.
+    if not await asyncio.to_thread(_validate_fid, fid, state):
         await interaction.followup.send(
-            f"Couldn't validate FID `{fid}` in state {STATE_ID} -- double check the FID "
-            f"(and that the player is in state {STATE_ID}) and try again.",
+            f"Couldn't validate FID `{fid}` in state {state} -- double check the FID "
+            f"(and that the player is in state {state}) and try again.",
             ephemeral=True,
         )
         return
@@ -318,30 +331,38 @@ async def register(interaction: discord.Interaction, fid: str, name: str):
 
     existing = next((e for e in players if e["fid"] == fid), None)
     if existing:
-        # Already registered: treat a new, different name as a rename.
+        # Already registered: treat a new name and/or state as an update.
+        changes = []
         if existing["name"] != display_name:
-            old_name = existing["name"]
+            changes.append(f"renamed **{existing['name']}** -> **{display_name}**")
             existing["name"] = display_name
+        if existing["state"] != state:
+            changes.append(f"moved state {existing['state']} -> {state}")
+            existing["state"] = state
+
+        if changes:
             _save_json(PLAYERS_FILE, players)
-            print(f"[register] {interaction.user} renamed FID {fid}: {old_name!r} -> {display_name!r}")
+            print(f"[register] {interaction.user} updated FID {fid}: {'; '.join(changes)}")
             await interaction.followup.send(
-                f"FID `{fid}` was already registered as **{old_name}** -- renamed to **{display_name}**.",
+                f"FID `{fid}` was already registered -- " + ", ".join(changes) + ".",
                 ephemeral=True,
             )
         else:
             await interaction.followup.send(
-                f"FID `{fid}` (**{existing['name']}**) is already registered.", ephemeral=True
+                f"FID `{fid}` (**{existing['name']}**, state {existing['state']}) "
+                "is already registered.",
+                ephemeral=True,
             )
         return
 
-    players.append({"fid": fid, "name": display_name})
+    players.append({"fid": fid, "name": display_name, "state": state})
     _save_json(PLAYERS_FILE, players)
 
-    print(f"[register] {interaction.user} registered FID {fid} ({display_name})")
+    print(f"[register] {interaction.user} registered FID {fid} ({display_name}) in state {state}")
 
     await interaction.followup.send(
-        f"Added! **{display_name}** (FID `{fid}`) will now get gift codes auto-redeemed. "
-        f"{len(players)} FID(s) registered in total.",
+        f"Added! **{display_name}** (FID `{fid}`, state {state}) will now get gift codes "
+        f"auto-redeemed. {len(players)} FID(s) registered in total.",
         ephemeral=True,
     )
 
@@ -367,7 +388,9 @@ async def unregister(interaction: discord.Interaction, fid: str):
 async def list_fids(interaction: discord.Interaction):
     players = _load_players()
     if players:
-        lines = "\n".join(f"- **{e['name']}** (FID `{e['fid']}`)" for e in players)
+        lines = "\n".join(
+            f"- **{e['name']}** (FID `{e['fid']}`, state {e['state']})" for e in players
+        )
         await interaction.response.send_message(
             f"Registered FIDs ({len(players)}):\n{lines}", ephemeral=True
         )
