@@ -22,7 +22,7 @@ STATE_ID = ####  # fallback only: used when a player has no state of their own
 
 # Regex used to pull a code out of a Discord announcement message.
 # Adjust to match how codes are actually formatted/announced.
-CODE_PATTERN = re.compile(r"\b[A-Za-z0-9]{6,12}\b")
+CODE_PATTERN = re.compile(r"\b[A-Za-z0-9]{6,12}\b") #Note this is inaccurate, must manually run cmd for some codes. fix in progress
 
 REQUEST_DELAY_SECONDS = 1.5  # pause between players to stay under rate limits
 # Store data files next to this script, not in whatever directory the bot
