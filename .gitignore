@@ -1,0 +1,4 @@
+.env
+players.json
+redeemed_results.json
+__pycache__/

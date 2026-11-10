@@ -1,11 +1,16 @@
 import asyncio
 import hashlib
 import json
+import logging
+import os
 import re
+import socket
 import time
 from pathlib import Path
 
+import aiohttp
 import requests
+from dotenv import load_dotenv
 from requests.adapters import HTTPAdapter, Retry
 
 import discord
@@ -15,10 +20,12 @@ from discord import app_commands
 # CONFIG -- edit these
 # ----------------------------------------------------------------------------
 
-DISCORD_BOT_TOKEN = "{Token}"
-ANNOUNCE_CHANNEL_ID = ###################  # channel where codes get posted
-GUILD_ID = ################### # your server's ID, for instant slash-command sync
-STATE_ID = ####  # fallback only: used when a player has no state of their own
+load_dotenv(Path(__file__).resolve().parent / ".env")
+
+DISCORD_BOT_TOKEN = os.environ["DISCORD_BOT_TOKEN"]
+ANNOUNCE_CHANNEL_ID = int(os.environ["ANNOUNCE_CHANNEL_ID"])  # channel where codes get posted
+GUILD_ID = int(os.environ["GUILD_ID"])  # your server's ID, for instant slash-command sync
+STATE_ID = int(os.environ.get("STATE_ID", 2372))  # fallback only: used when a player has no state of their own
 
 # Regex used to pull a code out of a Discord announcement message.
 # Adjust to match how codes are actually formatted/announced.
@@ -492,5 +499,20 @@ async def on_message(message: discord.Message):
         await message.channel.send(chunk)
 
 
+class _SilenceConnectionErrors(logging.Filter):
+    """discord.py already retries dropped connections on its own, but logs every
+    attempt as an ERROR with a full traceback. Drop those records when the cause
+    is just the network being unreachable (DNS failure, refused/reset connection,
+    timeout); anything else still gets logged normally."""
+
+    _TRANSIENT = (aiohttp.ClientConnectionError, socket.gaierror, asyncio.TimeoutError, ConnectionError)
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.exc_info and isinstance(record.exc_info[1], self._TRANSIENT):
+            return False
+        return True
+
+
 if __name__ == "__main__":
+    logging.getLogger("discord.client").addFilter(_SilenceConnectionErrors())
     client.run(DISCORD_BOT_TOKEN)
